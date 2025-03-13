@@ -1,0 +1,831 @@
+---
+title: "Censored Covariates Simulation"
+author: "Kihyun Han"
+date: "6/25/2024"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,  warrning = F, message = F)
+```
+
+# Setting 1
+```{r}
+# Checking packages installation
+if(!require(MASS)){
+  install.packages("MASS",repos = "http://cran.us.r-project.org")
+  library(MASS)
+}
+if(!require(foreach)){
+  install.packages("foreach",repos = "http://cran.us.r-project.org")
+  library(foreach)
+}
+if(!require(doParallel)){
+  install.packages("doParallel",repos = "http://cran.us.r-project.org")
+  library(doParallel)
+}
+if(!require(gaussquad)){
+  install.packages("gaussquad",repos = "http://cran.us.r-project.org")
+  library(gaussquad)
+}
+if(!require(pracma)){
+  install.packages("pracma",repos = "http://cran.us.r-project.org")
+  library(pracma)
+}
+if(!require(truncnorm)){
+  install.packages("truncnorm",repos = "http://cran.us.r-project.org")
+  library(truncnorm)
+}
+if(!require(rootSolve)){
+  install.packages("rootSolve",repos = "http://cran.us.r-project.org")
+  library(rootSolve)
+}
+if(!require(nleqslv)){
+  install.packages("nleqslv",repos = "http://cran.us.r-project.org")
+  library(nleqslv)
+}
+if(!require(tictoc)){
+  install.packages("tictoc",repos = "http://cran.us.r-project.org")
+  library(tictoc)
+}
+if(!require(doSNOW)){
+  install.packages("doSNOW",repos = "http://cran.us.r-project.org")
+  library(doSNOW)
+}
+```
+
+## Data generating process
+```{r}
+# Data generating process
+n = 1000
+d = 1
+#alpha1
+alpha1 = 0
+tau1 = 1
+#beta
+beta = c(0, 3)
+sigma = 4
+#alpha2
+tau2 = 1
+```
+
+```{r}
+# Data generating process
+data_generating = function(k, n, d, beta, alpha1, alpha2,
+                           sigma = 4, tau1 = 1, tau2 = 1){
+  set.seed(k)
+  # X|Z ~ N(alpha1, 1) truncated in [-1,1]
+  x_data = rtruncnorm(n, 
+                      a = -1, 
+                      b = 1, 
+                      mean = alpha1,
+                      sd = tau1)
+  # Y|X ~ N(beta_0 + beta_1 X, 4)
+  trunc_norm = rtruncnorm(n, 
+                          a = -3, 
+                          b = 3, 
+                          mean = 0,
+                          sd = 1)
+  y_data = cbind(1,x_data) %*% beta + sigma * trunc_norm
+  # C|Y ~ N(alpha2_0 + alpha2_1 Y,1)
+  c_data = rtruncnorm(n, 
+                      a = -1, 
+                      b = 1, 
+                      mean = cbind(1,y_data) %*% alpha2,
+                      sd = tau2)
+  # generate W and Delta
+  w_data = pmin(c_data, x_data)
+  delta_data = as.numeric(x_data<=c_data)
+  # calculate the censoring rate
+  cens_rate = sum(c_data<=x_data)/n
+  list(x_data = x_data,
+       y_data = y_data,
+       c_data = c_data,
+       w_data = w_data,
+       delta_data = delta_data,
+       cens_rate = cens_rate)
+}
+```
+
+
+# Define score function
+
+```{r}
+# Define score function
+S_beta_f = function(beta, y, x, sigma = 4){
+  res = y - (beta[1] + beta[2]*x)
+  res * c(1,x) / sigma^2
+}
+S_beta_f = Vectorize(S_beta_f, vectorize.args = 'x')
+
+```
+
+#####
+
+```{r}
+# For survival function with d = 2, we need to find m >= 4 bias-reducing kernel
+kern = function(cond, cond_data, h){ # Gaussian kernel
+  exp(-0.5 * apply(as.matrix(cond_data), 1, function(x) sum((cond - x)^2)) / h^2) / (sqrt(2 * pi) * h)
+}
+
+surv_x2 = function(t, w_data, delta_data,
+                   y, y_data, h1){
+  n = length(w_data)
+  idx_j = which((w_data <= t) & (delta_data == 1)) # index of j in z_data == z
+  if(length(idx_j) != 0){
+    kernel_vals = kern(y, y_data, h1) # used in denominator
+    denom = sapply(w_data[idx_j], function(w) {
+      sum(kernel_vals * (w_data >= w))})
+    log_vals = log(1 - kernel_vals[idx_j] / denom)
+    log_vals = ifelse(is.nan(log_vals), 0, log_vals)
+    max(exp(sum(log_vals)), 1 / n)
+  } else{
+    1
+  }
+}
+
+surv_x3 = function(t, w_data, delta_data,
+                   y, y_data, h1){
+  alpha1_star = alpha1
+  v_x = 1 / (beta[2]^2 / sigma^2 + 1 / tau1^2)
+  eta_x = v_x * (beta[2] * (y - beta[1]) / sigma^2
+                 + alpha1_star / tau1^2)
+  1 - ptruncnorm(t, 
+                 a = -1, 
+                 b = 1, 
+                 mean = eta_x,
+                 sd = sqrt(v_x))
+}
+
+surv_c2 = function(t, w_data, delta_data,
+                   y, y_data, h1){
+  n = length(w_data)
+  idx_j = which((w_data <= t) & (delta_data == 0)) # index of j in z_data == z
+  if(length(idx_j) != 0){
+    kernel_vals = kern(y, y_data, h1) # used in denominator
+    denom = sapply(w_data[idx_j], function(w) {
+      sum(kernel_vals * (w_data >= w))})
+    log_vals = log(1 - kernel_vals[idx_j] / denom)
+    log_vals = ifelse(is.nan(log_vals), 0, log_vals)
+    max(exp(sum(log_vals)), 1 / n)
+  } else{
+    1
+  }
+}
+
+surv_c3 = function(t, w_data, delta_data,
+                   y, y_data, h1){
+  1 - ptruncnorm(t, 
+                 a = -1, 
+                 b = 1, 
+                 mean = sum(c(1, y) * alpha2),
+                 sd = tau2)
+}
+
+```
+
+
+
+
+```{r}
+S_beta = function(beta, y, w, delta, alpha1_star, sigma = 4, tau1 = 1){
+  # E[I(X > W)S_beta_f(Y, X, Z) | W, Y, Z] / E[I(X > W) | W, Y, Z]
+  v_x = 1 / (beta[2]^2 / sigma^2 + 1 / tau1^2)
+  eta_x = v_x * (beta[2] * (y - beta[1]) / sigma^2
+                 + alpha1_star / tau1^2)
+  if(delta == 0){
+    if(w > 1){
+      S_beta_f(beta, y, w, sigma) # Any value possible
+    } else { # Middle part: integration
+      x_norm = (seq(w, 1, length.out = 20) - eta_x) / sqrt(v_x)
+      by = x_norm[2] - x_norm[1]
+      d = dnorm(x_norm)
+      num = S_beta_f(beta, y, x_norm * sqrt(v_x) + eta_x, sigma) %*% d
+      denom = sum(d)
+      num / denom
+    }
+  }else{
+    S_beta_f(beta, y, w, sigma)
+  }
+}
+
+S_beta_kern1 = function(beta, y, w, delta,
+                        y_data, w_data, delta_data,
+                        surv_c_vals,
+                        sigma = 4, tau1 = 1){
+  
+  # E1[I(X > W)S_beta_f(Y, X, Z) | W, Y, Z] / E1[I(X > W) | W, Y, Z]
+  if(delta == 0){
+    idx_list = which((delta_data == 1) & (w_data > w))
+    if(length(idx_list) != 0){
+      dens = dnorm(y, mean = cbind(1, w_data[idx_list]) %*% beta, 
+                   sd = sigma) # f(y|x,z) on target observations
+      num = sapply(idx_list,
+                   function(idx){
+                     S_beta_f(beta, y, w_data[idx], sigma)}) %*%
+        (dens / surv_c_vals[idx_list])
+      denom = sum(dens / surv_c_vals[idx_list])
+      if(denom == 0){
+        return(S_beta_f(beta, y, w, sigma))
+      }
+      return(num / denom)
+    } else { # Large w: S_beta_f(Y, W, Z)
+      return(S_beta_f(beta, y, w, sigma))
+    }
+  }else{ # delta = 1
+    return(S_beta_f(beta, y, w, sigma))
+  }
+}
+# S_beta(beta, -4, 4, delta = 0,
+#        alpha1, sigma = 4, tau1 = 1)
+# S_beta_kern1(beta, -4, 4, delta = 0,
+#              y_data, w_data, delta_data,
+#              surv_c_vals,
+#              sigma = 4, tau1 = 1)
+```
+
+```{r}
+gauss = function(tt, len = 3){
+  grid = seq(-len, len, length.out = tt)
+  d = dnorm(grid)
+  list(x = grid,
+       w = d / sum(d))
+}
+```
+
+```{r}
+# b_xz function will be evaluated on grid x_a
+b_xz_gauss_kern12 = function(beta, x_a,
+                              y_data, w_data, delta_data,
+                              surv_c_vals, surv_x_vals,
+                              s_beta_kern1_vals, h3,
+                              sigma = 4, tau1 = 1, tau2 = 1,
+                              tt = 20){
+  alpha1_star = alpha1
+  alpha2_star = alpha2
+  cc = gauss(tt)
+  
+  # temp2: E2[I(X < C) | Y, X, Z]S_beta(Y, X, Z) + E2[I(X > C)S_beta(Y, C, Z)| Y, X, Z]
+  temp2 = function(x, y){
+    idx_list = which((delta_data == 0))
+    if(length(idx_list) != 0){
+      denom = sum(kern(y, y_data[idx_list], h3) / surv_x_vals[idx_list])
+      y2 = y
+      if(denom == 0){
+        return(rep(0, length(beta)))
+      }
+      idx_list1 = which((delta_data == 0) & (x <= w_data))
+      if(length(idx_list1) != 0){
+        num1 = S_beta_f(beta, y2, x, sigma) *
+          sum(kern(y2, y_data[idx_list1], h3) / surv_x_vals[idx_list1])
+      } else { # Large x
+        num1 = rep(0, length(beta))
+      }
+      idx_list2 = which((delta_data == 0) & (x > w_data))
+      if(length(idx_list2) != 0){
+        num2 = sapply(idx_list2,
+                      function(idx){
+                        s_beta_kern1_vals[idx, ]}) %*%
+          (kern(y2, y_data[idx_list2], h3) / surv_x_vals[idx_list2])
+      } else { # small x
+        num2 = rep(0, length(beta))
+      }
+      return((num1 + num2) / denom)
+    } else { # all delta = 1: x < c
+      return(S_beta_f(beta, y, x, sigma))
+    }
+  }
+  # temp3: E[temp2(Y, X, Z)| X, Z]
+  temp3 = function(x){
+    sapply(sigma * cc$x + sum(c(1, x) * beta),
+           function(y_norm)
+             temp2(x, y_norm)) %*% cc$w
+  }
+  temp3 = Vectorize(temp3, vectorize.args = 'x')
+  return(temp3(x_a))
+}
+
+```
+
+
+
+
+
+```{r}
+#L.xz.gauss weight matrix
+find_weight = function(x, x_grid){
+  m = length(x_grid)
+  weight = rep(0, m)
+  if(x <= x_grid[1]){
+    weight[1] = 1
+  }else if(x >= x_grid[m]){
+    weight[m] = 1
+  }else{
+    idx = which.max(x < x_grid)
+    weight[idx] = (x - x_grid[idx-1]) / (x_grid[idx] - x_grid[idx-1])
+    weight[idx-1] = (x_grid[idx] - x)  / (x_grid[idx] - x_grid[idx-1])
+  }
+  return(weight)
+}
+
+```
+
+```{r}
+L_xz_gauss_kern12 = function(beta, x_a,
+                              y_data, w_data, delta_data,
+                              surv_c_vals, surv_x_vals, h3,
+                              sigma = 4, tau1 = 1, tau2 = 1,
+                              tt = 20){
+  cc = gauss(tt)
+  alpha1_star = alpha1
+  alpha2_star = alpha2
+  # temp2[a(X, Z)] = E2[I(X > C)temp(x_a, C, Y, Z)| X, Y, Z]
+  temp2 = function(x_a, x, y){
+    # temp[a(X, Z)] = E1[I(X > C)a(X, Z)|C, Y, Z] / E1[I(X > C)|C, Y, Z]
+    idx_list1 = which((delta_data == 1))
+    dens_vals = dnorm(y, mean = cbind(1, w_data[idx_list1]) %*% beta,
+                      sd = sigma)
+    find_weight_vals = sapply(idx_list1,
+                              function(idx){
+                                find_weight(w_data[idx], x_a)})
+    temp = function(x_a, c, y){
+      idx_list3 = which(w_data[idx_list1] > c)
+      if(length(idx_list3) != 0){
+        dens = dens_vals[idx_list3]
+        num = sapply(idx_list3,
+                     function(idx){
+                       find_weight_vals[, idx]}) %*%
+          (dens / surv_c_vals[idx_list1][idx_list3])
+        denom = sum(dens / surv_c_vals[idx_list1][idx_list3])
+        if(denom == 0){
+          return(rep(0, length(x_a)))
+        }
+        return(num / denom)
+      } else { # large c: a(C, Z)
+        find_weight(c, x_a)
+      }
+    }
+    idx_list = which((delta_data == 0))
+    kern_vals = kern(y, y_data[idx_list], h3)
+    if(length(idx_list) != 0){
+      denom = sum(kern_vals / surv_x_vals[idx_list])
+      y2 = y
+      if(denom == 0){
+        return(rep(0, length(x_a)))
+      }
+      idx_list2 = which((x > w_data[idx_list]))
+      if(length(idx_list2) != 0){
+        num2 = sapply(idx_list2,
+                      function(idx){
+                        temp(x_a, w_data[idx_list][idx], y2)}) %*%
+          (kern_vals[idx_list2] / surv_x_vals[idx_list][idx_list2])
+      } else { # small x: 0
+        num2 = rep(0, length(x_a))
+      }
+      return(num2 / denom)
+    }else{
+      return(rep(0, length(x_a)))
+    }
+  }
+  # temp3[a(X, Z)] = E[temp2(X, Y, Z)| X, Z]
+  temp3 = function(x_a, x){
+    sapply(sigma * cc$x + sum(beta * c(1, x)), function(y_norm){
+      temp2(x_a, x, y_norm)}) %*% cc$w
+  }
+  temp3 = Vectorize(temp3, vectorize.args = 'x')
+  # temp4 = E2[I(X < C) | Y, X, Z]a(X, Z)
+  temp4 = function(x, y){
+    idx_list = which((delta_data == 0))
+    kern_vals = kern(y, y_data[idx_list], h3)
+    if(length(idx_list) != 0){
+      denom = sum(kern_vals / surv_x_vals[idx_list])
+      y2 = y
+      if(denom == 0){
+        return(0)
+      }
+      idx_list1 = which((x <= w_data[idx_list]))
+      if(length(idx_list1) != 0){
+        num1 = sum(kern_vals[idx_list1] / surv_x_vals[idx_list][idx_list1])
+        return(num1 / denom)
+      } else { # small x: 0
+        return(0)
+      }
+    }else{
+      return(0)
+    }
+  }
+  temp4 = Vectorize(temp4, vectorize.args = 'y')
+  # temp5 = E[temp4(X, Y, Z) | X, Z]a(X, Z)
+  temp5 = function(x){
+    sum(temp4(x, sigma * cc$x + sum(beta * c(1, x))) * cc$w)
+  }
+  temp5 = Vectorize(temp5, vectorize.args = 'x')
+  res = diag(temp5(x_a)) + t(temp3(x_a, x_a))
+  res
+}
+
+
+```
+
+```{r}
+# Solution of integral equation
+a_gauss_kern12 = function(beta, x_a,
+                          y_data, w_data, delta_data,
+                          surv_c_vals, surv_x_vals, h3,
+                          sigma = 4, tau1 = 1, tau2 = 1,
+                          tt = 20){
+  # find s_beta_kern1 values on the grid
+  s_beta_kern1_vals = matrix(0, ncol = length(beta), nrow = n)
+  for(idx in which((delta_data == 0))){
+    s_beta_kern1_vals[idx, ] = S_beta_kern1(beta, y_data[idx], w_data[idx], 0,
+                                            y_data, w_data, delta_data,
+                                            surv_c_vals,
+                                            sigma, tau1)
+  }
+  MASS::ginv(L_xz_gauss_kern12(beta, x_a,
+                               y_data, w_data, delta_data,
+                               surv_c_vals, surv_x_vals, h3,
+                               sigma, tau1, tau2, tt)) %*%
+    t(b_xz_gauss_kern12(beta, x_a,
+                        y_data, w_data, delta_data,
+                        surv_c_vals, surv_x_vals,
+                        s_beta_kern1_vals, h3,
+                        sigma, tau1, tau2, tt))
+}
+```
+
+
+```{r}
+S_eff_gauss_kern12 = function(beta, y, w, delta, x_a, a0,
+                              y_data, w_data, delta_data,
+                              surv_c_vals, surv_x_vals,
+                              sigma = 4, tau1 = 1, tau2 = 1, tt = 20){
+  len_beta = length(beta)
+  if(delta == 0){
+    # temp[a(X, Z)] =  E[I(X > C)a(X, Z)|C, Y, Z] / E[I(X > C)|C, Y, Z]
+    temp = function(x_a, c, y){
+      idx_list = which((delta_data == 1) & (w_data > c))
+      if(length(idx_list) != 0){
+        dens = dnorm(y, mean = cbind(1, w_data[idx_list]) %*% beta, 
+                     sd = sigma)
+        num = sapply(idx_list,
+                     function(idx){
+                       find_weight(w_data[idx], x_a)}) %*%
+          (dens / surv_c_vals[idx_list])
+        denom = sum(dens / surv_c_vals[idx_list])
+        if(denom == 0){
+          return(rep(0, length(x_a)))
+        }
+        return(num / denom)
+      } else { # large c
+        find_weight(c, x_a)
+      }
+    }
+    # S_beta
+    sbeta = S_beta_kern1(beta, y, w, 0,
+                         y_data, w_data, delta_data,
+                         surv_c_vals,
+                         sigma, tau1)
+    # S_eff = S_beta - a0
+    return(sbeta - t(a0) %*% temp(x_a, w, y))
+  } else { # If delta = 1, linearize from the grid
+    m = length(x_a)
+    a0_w = vector(length = len_beta)
+    for(j in 1:len_beta){
+      a0_w[j] = approx(x_a, a0[, j], w, rule = 2)$y # linear interpolation
+    }
+    sbeta = S_beta_f(beta, y, w, sigma)
+    # S_eff = S_beta - a0
+    return(sbeta - a0_w)
+  }
+}
+
+```
+
+
+
+
+```{r}
+pe_gauss_kern12 = function(beta, y_data, w_data, delta_data, x_a,
+                           surv_c_vals, surv_x_vals, h3 = 3,
+                           sigma = 4, tau1 = 1, tau2 = 1, tt = 20){
+  len_beta = length(beta)
+  # Define a0
+  a0 = a_gauss_kern12(beta, x_a,
+                      y_data, w_data, delta_data,
+                      surv_c_vals, surv_x_vals, h3,
+                      sigma, tau1, tau2, tt)
+  val = rep(0, len_beta)
+  n = length(y_data)
+  for(i in 1:n){
+    val = val + S_eff_gauss_kern12(beta, y_data[i], w_data[i], delta_data[i],
+                                   x_a, a0,
+                                   y_data, w_data, delta_data,
+                                   surv_c_vals, surv_x_vals,
+                                   sigma, tau1, tau2, tt)
+  }
+  return(val)
+}
+
+```
+
+
+```{r}
+get_beta_param_kern12 = function(k, n, d, 
+                                 beta, alpha1, alpha2,
+                                 h1 = 1, h3 = 1,
+                                 sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20){
+  data_k = data_generating(k, n, d, beta, alpha1, alpha2, sigma, tau1, tau2)
+  y_data = data_k$y_data
+  c_data = data_k$c_data
+  w_data = data_k$w_data
+  delta_data = data_k$delta_data
+  
+  surv_c_vals = sapply(1:n, function(i){
+    surv_c2(w_data[i], w_data, delta_data,
+            y_data[i], y_data, h1)})
+  surv_x_vals = sapply(1:n, function(i){
+    surv_x2(w_data[i], w_data, delta_data,
+            y_data[i], y_data, h1)})
+  x_a = seq(-1, 1, length.out = m)
+  # equation solve
+  tic(k)
+  set.seed(k)
+  result = nleqslv::nleqslv(beta + rnorm(d + 1) * 0.1, pe_gauss_kern12, 
+                            y_data = y_data,
+                            w_data = w_data,
+                            delta_data = delta_data,
+                            x_a = x_a,
+                            surv_c_vals = surv_c_vals,
+                            surv_x_vals = surv_x_vals,
+                            h3 = h3,
+                            sigma = sigma,
+                            tt = tt)
+  toc()
+  print(result$message)
+  return(result$x)
+}
+
+```
+
+
+```{r, eval = F}
+myCluster <- makeCluster(detectCores() - 1)
+registerDoSNOW(myCluster)
+M = 1000
+progress = function(n) cat(sprintf("task %d is complete\n", n))
+opts = list(progress = progress)
+clusterExport(myCluster, list('beta',
+                               'alpha1',
+                               'alpha2',
+                               'surv_c2',
+                               'surv_x2',
+                               'kern',
+                               'find_weight',
+                               'S_beta_f',
+                               'S_beta_kern1',
+                               'b_xz_gauss_kern12',
+                               'L_xz_gauss_kern12',
+                               'a_gauss_kern12',
+                               'S_eff_gauss_kern12',
+                               'pe_gauss_kern12',
+                               'data_generating',
+                               'get_beta_param_kern12'))
+# h3_list = 0.5 * c(20:3, seq(2.8, 0.2, by = -0.2))
+h3_list = c(1, 3)
+for(h3 in h3_list){
+  result_beta = foreach(k = 1:1000,
+                        .combine = 'cbind',
+                        .packages = c('MASS',
+                                      'foreach',
+                                      'doParallel',
+                                      'gaussquad',
+                                      'nleqslv',
+                                      'pracma',
+                                      'tictoc',
+                                      'truncnorm'),
+                        .options.snow = opts,
+                        .verbose = T) %dopar%
+    {
+      set.seed(k)
+      get_beta_param_kern12(k, n, d,
+                            beta, alpha1, alpha2 = c(3,0.12),
+                            h1 = 3, h3 = h3,
+                            sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20)
+    }
+  
+  save(result_beta, file = paste('Case_kernel12_low_3_', h3, '.Rdata', sep = ''))
+}
+for(h3 in h3_list){
+  result_beta = foreach(k = 1:1000,
+                        .combine = 'cbind',
+                        .packages = c('MASS',
+                                      'foreach',
+                                      'doParallel',
+                                      'gaussquad',
+                                      'nleqslv',
+                                      'pracma',
+                                      'tictoc',
+                                      'truncnorm'),
+                        .options.snow = opts,
+                        .verbose = T) %dopar%
+    {
+      set.seed(k)
+      get_beta_param_kern12(k, n, d,
+                            beta, alpha1, alpha2 = c(1, 0.12),
+                            h1 = 3, h3 = h3,
+                            sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20)
+    }
+  
+  save(result_beta, file = paste('Case_kernel12_low_3_', h3, '.Rdata', sep = ''))
+}
+for(h3 in h3_list){
+  result_beta = foreach(k = 1:1000,
+                        .combine = 'cbind',
+                        .packages = c('MASS',
+                                      'foreach',
+                                      'doParallel',
+                                      'gaussquad',
+                                      'nleqslv',
+                                      'pracma',
+                                      'tictoc',
+                                      'truncnorm'),
+                        .options.snow = opts,
+                        .verbose = T) %dopar%
+    {
+      set.seed(k)
+      get_beta_param_kern12(k, n, d,
+                            beta, alpha1, alpha2 = c(-1, 0.12),
+                            h1 = 3, h3 = h3,
+                            sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20)
+    }
+  
+  save(result_beta, file = paste('Case_kernel12_low_3_', h3, '.Rdata', sep = ''))
+}
+stopCluster(myCluster)
+
+```
+
+
+
+######################################3
+# Variance estimation
+```{r}
+estimated_variance_kern12 = function(beta, y_data, w_data, delta_data,
+                                     h1 = 1, h3 = 1,
+                                     sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+                                     eps = 0.001){
+  len_beta = length(beta)
+  get_Sigma = function(beta, y_data, w_data, delta_data,
+                       surv_c_vals, surv_x_vals, h3,
+                       sigma, tau1, tau2,
+                       tt, m, eps){
+    # Define x_a
+    x_a = seq(-1, 1, length.out = m)
+    # Define a0
+    a0 = a_gauss_kern12(beta, x_a,
+                        y_data, w_data, delta_data,
+                        surv_c_vals, surv_x_vals, h3,
+                        sigma, tau1, tau2,
+                        tt)
+    val = matrix(nrow = n, ncol = len_beta)
+    for(i in 1:n){
+      val[i, ] = S_eff_gauss_kern12(beta, y_data[i], w_data[i], delta_data[i],
+                                   x_a, a0,
+                                   y_data, w_data, delta_data,
+                                   surv_c_vals, surv_x_vals,
+                                   sigma, tau1, tau2, tt)
+    }
+    return(var(val))
+  }
+  surv_c_vals = sapply(1:n, function(i){
+    surv_c2(w_data[i], w_data, delta_data,
+            y_data[i], y_data, h1)})
+  surv_x_vals = sapply(1:n, function(i){
+    surv_x2(w_data[i], w_data, delta_data,
+            y_data[i], y_data, h1)})
+  Sigma = get_Sigma(beta, y_data, w_data, delta_data,
+                    surv_c_vals, surv_x_vals, h3,
+                    sigma, tau1, tau2,
+                    tt, m, eps)
+  return(MASS::ginv(Sigma))
+}
+
+```
+
+
+
+
+```{r, eval = F}
+myCluster <- makeCluster(detectCores() - 1)
+registerDoSNOW(myCluster)
+M = 1000
+progress = function(n) cat(sprintf("task %d is complete\n", n))
+opts = list(progress = progress)
+clusterExport(myCluster, list('beta',
+                               'alpha1',
+                               'surv_c2',
+                               'surv_x2',
+                               'kern',
+                               'gauss',
+                               'find_weight',
+                               'S_beta_f',
+                               'S_beta_kern1',
+                               'b_xz_gauss_kern12',
+                               'L_xz_gauss_kern12',
+                               'a_gauss_kern12',
+                               'S_eff_gauss_kern12',
+                               'pe_gauss_kern12',
+                               'data_generating',
+                               'get_beta_param_kern12',
+                               'estimated_variance_kern12'))
+load('Case_kernel12_low_3_1.Rdata')
+variance = foreach(k = 1:1000,
+                   .combine = 'c',
+                   .packages = c('MASS',
+                                 'foreach',
+                                 'doParallel',
+                                 'gaussquad',
+                                 'nleqslv',
+                                 'pracma',
+                                 'tictoc',
+                                 'truncnorm'),
+                   .options.snow = opts,
+                   .verbose = T) %dopar% 
+  { 
+    tic(k)
+    beta_hat = result_beta[, k]
+    data_k = data_generating(k, n, d, beta, alpha1, alpha2 = c(3, 0.12), sigma, tau1, tau2)
+    y_data = data_k$y_data
+    w_data = data_k$w_data
+    delta_data = data_k$delta_data
+    var_k = estimated_variance_kern12(
+      beta_hat, y_data, w_data, delta_data,
+      h1 = 3, h3 = 1,
+      sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+      eps = 0.001)
+    toc()
+    var_k
+  }
+save(variance, file = 'Variance_kernel12_low_3_1.Rdata')
+
+load('Case_kernel12_mid_3_1.Rdata')
+variance = foreach(k = 1:1000,
+                   .combine = 'c',
+                   .packages = c('MASS',
+                                 'foreach',
+                                 'doParallel',
+                                 'gaussquad',
+                                 'nleqslv',
+                                 'pracma',
+                                 'tictoc',
+                                 'truncnorm'),
+                   .options.snow = opts,
+                   .verbose = T) %dopar% 
+  { 
+    tic(k)
+    beta_hat = result_beta[, k]
+    data_k = data_generating(k, n, d, beta, alpha1, alpha2 = c(1, 0.12), sigma, tau1, tau2)
+    y_data = data_k$y_data
+    w_data = data_k$w_data
+    delta_data = data_k$delta_data
+    var_k = estimated_variance_kern12(
+      beta_hat, y_data, w_data, delta_data,
+      h1 = 3, h3 = 1,
+      sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+      eps = 0.001)
+    toc()
+    var_k
+  }
+save(variance, file = 'Variance_kernel12_mid_3_1.Rdata')
+
+load('Case_kernel12_high_3_1.Rdata')
+variance = foreach(k = 1:1000,
+                   .combine = 'c',
+                   .packages = c('MASS',
+                                 'foreach',
+                                 'doParallel',
+                                 'gaussquad',
+                                 'nleqslv',
+                                 'pracma',
+                                 'tictoc',
+                                 'truncnorm'),
+                   .options.snow = opts,
+                   .verbose = T) %dopar% 
+  { 
+    tic(k)
+    beta_hat = result_beta[, k]
+    data_k = data_generating(k, n, d, beta, alpha1, alpha2 = c(-1, 0.12), sigma, tau1, tau2)
+    y_data = data_k$y_data
+    w_data = data_k$w_data
+    delta_data = data_k$delta_data
+    var_k = estimated_variance_kern12(
+      beta_hat, y_data, w_data, delta_data,
+      h1 = 3, h3 = 1,
+      sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+      eps = 0.001)
+    toc()
+    var_k
+  }
+save(variance, file = 'Variance_kernel12_high_3_1.Rdata')
+```

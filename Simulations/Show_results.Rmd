@@ -1,0 +1,359 @@
+---
+title: "Censored Covariates Simulation"
+author: "Kihyun Han"
+date: "6/25/2024"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,  warrning = F, message = F)
+```
+
+
+## Finding bias, sample variance, average estimated variance and the coverage of the 95% confidence intervals
+```{r}
+get_table = function(result_beta, beta, n, variance){
+  bias = apply(result_beta, 1, mean) - beta
+  stdev = apply(result_beta, 1, sd)
+  MSE = bias^2 + stdev^2
+  len.beta = length(beta)
+  variance1 = variance[-1,]
+  est_var = apply(variance1, 1, median)
+  coverage = vector(length = len.beta)
+  for(j in 1:len.beta){
+    coverage[j] = mean((result_beta[j,] - beta[j])^2 < (1.96^2 * variance1[j,]/n))
+  }
+  return(cbind(Bias = round(bias, digits = 3),
+               SD = round(stdev, digits = 3),
+               SE = round(sqrt(est_var/n), digits = 3),
+               `95% Coverage` = 100*round(coverage, digits = 3)))
+}
+beta = c(0,3)
+n = 1000
+
+get_table_CC = function(result_beta, beta, n, variance){
+  bias = apply(result_beta, 1, mean) - beta
+  stdev = apply(result_beta, 1, sd)
+  MSE = bias^2 + stdev^2
+  len.beta = length(beta)
+  variance1 = variance[-1,]
+  est_var = apply(variance1, 1, median)
+  coverage = vector(length = len.beta)
+  for(j in 1:len.beta){
+    coverage[j] = mean((result_beta[j,] - beta[j])^2 < (1.96^2 * variance1[j,]))
+  }
+  return(cbind(Bias = round(bias, digits = 3),
+               SD = round(stdev, digits = 3),
+               SE = round(sqrt(est_var), digits = 3),
+               `95% Coverage` = 100*round(coverage, digits = 3)))
+}
+```
+
+```{r, eval = F}
+load('Case_param12_low.Rdata')
+load('Variance_param12_low.Rdata')
+table_param12_low = get_table(result_beta, beta, n, variance)
+
+load('Case_param12_mid.Rdata')
+load('Variance_param12_mid.Rdata')
+table_param12_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_param12_high.Rdata')
+load('Variance_param12_high.Rdata')
+table_param12_high = get_table(result_beta, beta, n, variance)
+
+load('Case_param1_unif2_low.Rdata')
+load('Variance_param1_unif2_low.Rdata')
+table_param1_unif2_low = get_table(result_beta, beta, n, variance)
+
+load('Case_param1_unif2_mid.Rdata')
+load('Variance_param1_unif2_mid.Rdata')
+table_param1_unif2_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_param1_unif2_high.Rdata')
+load('Variance_param1_unif2_high.Rdata')
+table_param1_unif2_high = get_table(result_beta, beta, n, variance)
+
+load('Case_unif1_param2_low.Rdata')
+load('Variance_unif1_param2_low.Rdata')
+table_unif1_param2_low = get_table(result_beta, beta, n, variance)
+
+load('Case_unif1_param2_mid.Rdata')
+load('Variance_unif1_param2_mid.Rdata')
+table_unif1_param2_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_unif1_param2_high.Rdata')
+load('Variance_unif1_param2_high.Rdata')
+table_unif1_param2_high = get_table(result_beta, beta, n, variance)
+
+load('Case_unif12_low.Rdata')
+load('Variance_unif12_low.Rdata')
+table_unif12_low = get_table(result_beta, beta, n, variance)
+
+load('Case_unif12_mid.Rdata')
+load('Variance_unif12_mid.Rdata')
+table_unif12_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_unif12_high.Rdata')
+load('Variance_unif12_high.Rdata')
+table_unif12_high = get_table(result_beta, beta, n, variance)
+
+load('Case_kernel12_low_3_1.Rdata')
+load('Variance_kernel12_low_3_1.Rdata')
+idx = (abs(result_beta[1,] - beta[1]) <= 0.5) & (abs(result_beta[2,] - beta[2]) <= 1)
+result_beta_new = result_beta[, idx]
+n_new = ncol(result_beta_new)
+variance_new = variance[, idx]
+table_kernel12_low = get_table(result_beta_new, beta, n_new, variance_new)
+
+load('Case_kernel12_mid_3_1.Rdata')
+load('Variance_kernel12_mid_3_1.Rdata')
+idx = (abs(result_beta[1,] - beta[1]) <= 0.5) & (abs(result_beta[2,] - beta[2]) <= 1)
+result_beta_new = result_beta[, idx]
+n_new = ncol(result_beta_new)
+variance_new = variance[, idx]
+table_kernel12_mid = get_table(result_beta_new, beta, n_new, variance_new)
+
+load('Case_kernel12_high_3_1.Rdata')
+load('Variance_kernel12_high_3_1.Rdata')
+# result_beta = narrow(result_beta)
+idx = (abs(result_beta[1,] - beta[1]) <= 0.5) & (abs(result_beta[2,] - beta[2]) <= 1)
+result_beta_new = result_beta[, idx]
+n_new = ncol(result_beta_new)
+variance_new = variance[, idx]
+table_kernel12_high = get_table(result_beta_new, beta, n_new, variance_new)
+
+load('Case_kernel1_unif2_low_3_1.Rdata')
+load('Variance_kernel1_unif2_low_3_1.Rdata')
+idx = (abs(result_beta[1,] - beta[1]) <= 0.5) & (abs(result_beta[2,] - beta[2]) <= 1)
+result_beta_new = result_beta[, idx]
+n_new = ncol(result_beta_new)
+variance_new = variance[, idx]
+table_kernel1_unif2_low = get_table(result_beta_new, beta, n_new, variance_new)
+
+load('Case_kernel1_unif2_mid_3_1.Rdata')
+load('Variance_kernel1_unif2_mid_3_1.Rdata')
+idx = (abs(result_beta[1,] - beta[1]) <= 0.5) & (abs(result_beta[2,] - beta[2]) <= 1)
+result_beta_new = result_beta[, idx]
+n_new = ncol(result_beta_new)
+variance_new = variance[, idx]
+table_kernel1_unif2_mid = get_table(result_beta_new, beta, n_new, variance_new)
+
+load('Case_kernel1_unif2_high_3_1.Rdata')
+load('Variance_kernel1_unif2_high_3_1.Rdata')
+idx = (abs(result_beta[1,] - beta[1]) <= 0.5) & (abs(result_beta[2,] - beta[2]) <= 1)
+result_beta_new = result_beta[, idx]
+n_new = ncol(result_beta_new)
+variance_new = variance[, idx]
+table_kernel1_unif2_high = get_table(result_beta_new, beta, n_new, variance_new)
+
+load('Case_unif1_kernel2_low_3_1.Rdata')
+load('Variance_unif1_kernel2_low_3_1.Rdata')
+idx = (abs(result_beta[1,] - beta[1]) <= 0.5) & (abs(result_beta[2,] - beta[2]) <= 1)
+result_beta_new = result_beta[, idx]
+n_new = ncol(result_beta_new)
+variance_new = variance[, idx]
+table_unif1_kernel2_low = get_table(result_beta_new, beta, n_new, variance_new)
+
+load('Case_unif1_kernel2_mid_3_1.Rdata')
+load('Variance_unif1_kernel2_mid_3_1.Rdata')
+idx = (abs(result_beta[1,] - beta[1]) <= 0.5) & (abs(result_beta[2,] - beta[2]) <= 1)
+result_beta_new = result_beta[, idx]
+n_new = ncol(result_beta_new)
+variance_new = variance[, idx]
+table_unif1_kernel2_mid = get_table(result_beta_new, beta, n_new, variance_new)
+
+load('Case_unif1_kernel2_high_3_1.Rdata')
+load('Variance_unif1_kernel2_high_3_1.Rdata')
+idx = (abs(result_beta[1,] - beta[1]) <= 0.5) & (abs(result_beta[2,] - beta[2]) <= 1)
+result_beta_new = result_beta[, idx]
+n_new = ncol(result_beta_new)
+variance_new = variance[, idx]
+table_unif1_kernel2_high = get_table(result_beta_new, beta, n_new, variance_new)
+
+load('Case_CC_low.Rdata')
+load('Variance_CC_low.Rdata')
+table_CC_low = get_table_CC(result_beta, beta, n, variance)
+
+load('Case_CC_mid.Rdata')
+load('Variance_CC_mid.Rdata')
+table_CC_mid = get_table_CC(result_beta, beta, n, variance)
+
+load('Case_CC_high.Rdata')
+load('Variance_CC_high.Rdata')
+table_CC_high = get_table_CC(result_beta, beta, n, variance)
+
+load('Case_IPW_param2_low.Rdata')
+load('Variance_IPW_param2_low.Rdata')
+table_IPW_param2_low = get_table(result_beta, beta, n, variance)
+
+load('Case_IPW_param2_mid.Rdata')
+load('Variance_IPW_param2_mid.Rdata')
+table_IPW_param2_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_IPW_param2_high.Rdata')
+load('Variance_IPW_param2_high.Rdata')
+table_IPW_param2_high = get_table(result_beta, beta, n, variance)
+
+load('Case_IPW_unif2_low.Rdata')
+load('Variance_IPW_unif2_low.Rdata')
+table_IPW_unif2_low = get_table(result_beta, beta, n, variance)
+
+load('Case_IPW_unif2_mid.Rdata')
+load('Variance_IPW_unif2_mid.Rdata')
+table_IPW_unif2_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_IPW_unif2_high.Rdata')
+load('Variance_IPW_unif2_high.Rdata')
+table_IPW_unif2_high = get_table(result_beta, beta, n, variance)
+
+load('Case_IPW_kernel2_low.Rdata')
+load('Variance_IPW_kernel2_low.Rdata')
+table_IPW_kernel2_low = get_table(result_beta, beta, n, variance)
+
+load('Case_IPW_kernel2_mid.Rdata')
+load('Variance_IPW_kernel2_mid.Rdata')
+table_IPW_kernel2_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_IPW_kernel2_high.Rdata')
+load('Variance_IPW_kernel2_high.Rdata')
+table_IPW_kernel2_high = get_table(result_beta, beta, n, variance)
+
+load('Case_MLE_param1_low.Rdata')
+load('Variance_MLE_param1_low.Rdata')
+table_MLE_param1_low = get_table(result_beta, beta, n, variance)
+
+load('Case_MLE_param1_mid.Rdata')
+load('Variance_MLE_param1_mid.Rdata')
+table_MLE_param1_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_MLE_param1_high.Rdata')
+load('Variance_MLE_param1_high.Rdata')
+table_MLE_param1_high = get_table(result_beta, beta, n, variance)
+
+load('Case_MLE_unif1_low.Rdata')
+load('Variance_MLE_unif1_low.Rdata')
+table_MLE_unif1_low = get_table(result_beta, beta, n, variance)
+
+load('Case_MLE_unif1_mid.Rdata')
+load('Variance_MLE_unif1_mid.Rdata')
+table_MLE_unif1_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_MLE_unif1_high.Rdata')
+load('Variance_MLE_unif1_high.Rdata')
+table_MLE_unif1_high = get_table(result_beta, beta, n, variance)
+
+load('Case_MLE_kern1_low.Rdata')
+load('Variance_MLE_kern1_low.Rdata')
+table_MLE_kern1_low = get_table(result_beta, beta, n, variance)
+
+load('Case_MLE_kern1_mid.Rdata')
+load('Variance_MLE_kern1_mid.Rdata')
+table_MLE_kern1_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_MLE_kern1_high.Rdata')
+load('Variance_MLE_kern1_high.Rdata')
+table_MLE_kern1_high = get_table(result_beta, beta, n, variance)
+
+load('Case_imp_param1_low.Rdata')
+load('Variance_imp_param1_low.Rdata')
+table_imp_param1_low = get_table(result_beta, beta, n, variance)
+
+load('Case_imp_param1_mid.Rdata')
+load('Variance_imp_param1_mid.Rdata')
+table_imp_param1_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_imp_param1_high.Rdata')
+load('Variance_imp_param1_high.Rdata')
+table_imp_param1_high = get_table(result_beta, beta, n, variance)
+
+load('Case_imp_unif1_low.Rdata')
+load('Variance_imp_unif1_low.Rdata')
+table_imp_unif1_low = get_table(result_beta, beta, n, variance)
+
+load('Case_imp_unif1_mid.Rdata')
+load('Variance_imp_unif1_mid.Rdata')
+table_imp_unif1_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_imp_unif1_high.Rdata')
+load('Variance_imp_unif1_high.Rdata')
+table_imp_unif1_high = get_table(result_beta, beta, n, variance)
+
+load('Case_imp_kern1_low.Rdata')
+load('Variance_imp_kern1_low.Rdata')
+table_imp_kern1_low = get_table(result_beta, beta, n, variance)
+
+load('Case_imp_kern1_mid.Rdata')
+load('Variance_imp_kern1_mid.Rdata')
+table_imp_kern1_mid = get_table(result_beta, beta, n, variance)
+
+load('Case_imp_kern1_high.Rdata')
+load('Variance_imp_kern1_high.Rdata')
+table_imp_kern1_high = get_table(result_beta, beta, n, variance)
+```
+
+
+```{r, eval = F}
+result_final = vector(mode = 'list', length = 2)
+for(j in 1:2){
+  result_final[[j]] = cbind(rbind(table_param12_low[j,],
+                                  table_param1_unif2_low[j,],
+                                  table_unif1_param2_low[j,],
+                                  table_unif12_low[j,],
+                                  table_kernel12_low[j,],
+                                  table_kernel1_unif2_low[j,],
+                                  table_unif1_kernel2_low[j,],
+                                  table_CC_low[j,],
+                                  table_IPW_param2_low[j,],
+                                  table_IPW_unif2_low[j,],
+                                  table_IPW_kernel2_low[j,],
+                                  table_MLE_param1_low[j,],
+                                  table_MLE_unif1_low[j,],
+                                  table_MLE_kern1_low[j,],
+                                  table_imp_param1_low[j,],
+                                  table_imp_unif1_low[j,],
+                                  table_imp_kern1_low[j,]),
+                            rbind(table_param12_mid[j,],
+                                  table_param1_unif2_mid[j,],
+                                  table_unif1_param2_mid[j,],
+                                  table_unif12_mid[j,],
+                                  table_kernel12_mid[j,],
+                                  table_kernel1_unif2_mid[j,],
+                                  table_unif1_kernel2_mid[j,],
+                                  table_CC_mid[j,],
+                                  table_IPW_param2_mid[j,],
+                                  table_IPW_unif2_mid[j,],
+                                  table_IPW_kernel2_mid[j,],
+                                  table_MLE_param1_mid[j,],
+                                  table_MLE_unif1_mid[j,],
+                                  table_MLE_kern1_mid[j,],
+                                  table_imp_param1_mid[j,],
+                                  table_imp_unif1_mid[j,],
+                                  table_imp_kern1_mid[j,]),
+                            rbind(table_param12_high[j,],
+                                  table_param1_unif2_high[j,],
+                                  table_unif1_param2_high[j,],
+                                  table_unif12_high[j,],
+                                  table_kernel12_high[j,],
+                                  table_kernel1_unif2_high[j,],
+                                  table_unif1_kernel2_high[j,],
+                                  table_CC_high[j,],
+                                  table_IPW_param2_high[j,],
+                                  table_IPW_unif2_high[j,],
+                                  table_IPW_kernel2_high[j,],
+                                  table_MLE_param1_high[j,],
+                                  table_MLE_unif1_high[j,],
+                                  table_MLE_kern1_high[j,],
+                                  table_imp_param1_high[j,],
+                                  table_imp_unif1_high[j,],
+                                  table_imp_kern1_high[j,])
+                            )
+}
+# name vector("$\wh\bb^*$", "$\wh\bb^\star$", "$\wh\bb$", "$\wh\bb^o$", "$\wh\bb^{*\star}$")
+result_final
+# write.table(result_final[[1]], file = 'result_table.csv',
+#             sep = ', ', quote = F)
+# write.table(result_final[[2]], file = 'result_table.csv',
+#             sep = ', ', quote = F, append = T)
+```
+

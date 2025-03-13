@@ -1,0 +1,589 @@
+---
+title: "Censored Covariates Simulation"
+author: "Kihyun Han"
+date: "6/25/2024"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,  warrning = F, message = F)
+```
+
+# Setting 1
+```{r}
+# Checking packages installation
+if(!require(MASS)){
+  install.packages("MASS",repos = "http://cran.us.r-project.org")
+  library(MASS)
+}
+if(!require(foreach)){
+  install.packages("foreach",repos = "http://cran.us.r-project.org")
+  library(foreach)
+}
+if(!require(doParallel)){
+  install.packages("doParallel",repos = "http://cran.us.r-project.org")
+  library(doParallel)
+}
+if(!require(gaussquad)){
+  install.packages("gaussquad",repos = "http://cran.us.r-project.org")
+  library(gaussquad)
+}
+if(!require(pracma)){
+  install.packages("pracma",repos = "http://cran.us.r-project.org")
+  library(pracma)
+}
+if(!require(truncnorm)){
+  install.packages("truncnorm",repos = "http://cran.us.r-project.org")
+  library(truncnorm)
+}
+if(!require(rootSolve)){
+  install.packages("rootSolve",repos = "http://cran.us.r-project.org")
+  library(rootSolve)
+}
+if(!require(nleqslv)){
+  install.packages("nleqslv",repos = "http://cran.us.r-project.org")
+  library(nleqslv)
+}
+if(!require(tictoc)){
+  install.packages("tictoc",repos = "http://cran.us.r-project.org")
+  library(tictoc)
+}
+if(!require(doSNOW)){
+  install.packages("doSNOW",repos = "http://cran.us.r-project.org")
+  library(doSNOW)
+}
+```
+
+## Data generating process
+1 dimensional z
+```{r}
+# Data generating process
+n = 1000
+d = 1
+#alpha1
+alpha1 = 0
+tau1 = 1
+#beta
+beta = c(0, 3)
+sigma = 4
+#alpha2
+# alpha2 = c(3, 0.12)
+# tau2 = 0.8
+tau2 = 1
+```
+
+```{r}
+# Data generating process
+data_generating = function(k, n, d, beta, alpha1, alpha2,
+                           sigma = 4, tau1 = 1, tau2 = 1){
+  set.seed(k)
+  # X|Z ~ N(alpha1, 1) truncated in [-1,1]
+  x_data = rtruncnorm(n, 
+                      a = -1, 
+                      b = 1, 
+                      mean = alpha1,
+                      sd = tau1)
+  # Y|X ~ N(beta_0 + beta_1 X, 1)
+  trunc_norm = rnorm(n)
+  trunc_norm = trunc_norm * (trunc_norm < 3) * (trunc_norm > -3)
+  y_data = cbind(1,x_data) %*% beta + sigma * trunc_norm
+  # C|Y ~ N(alpha2_0 + alpha2_1 Y,1)
+  c_data = rtruncnorm(n, 
+                      a = -1, 
+                      b = 1, 
+                      mean = cbind(1,y_data) %*% alpha2,
+                      sd = tau2)
+  # trunc_norm = trunc_norm * (trunc_norm < 3) * (trunc_norm > -3)
+  # c_data = cbind(1,y_data) %*% alpha2 + tau2 * trunc_norm
+  # generate W and Delta
+  w_data = pmin(c_data,x_data)
+  delta_data = as.numeric(x_data<=c_data)
+  # calculate the censoring rate
+  cens.rate = sum(c_data<=x_data)/n
+  list(x_data = x_data,
+       y_data = y_data,
+       c_data = c_data,
+       w_data = w_data,
+       delta_data = delta_data,
+       cens.rate = cens.rate)
+}
+# data_k = data_generating(2, n, d, beta, alpha1, alpha2)
+# data_k$cens.rate
+# plot(data_k$x_data, data_k$c_data)
+# # abline(0,1, col = 'red')
+```
+
+```{r}
+# Define score function
+S.beta.f = function(beta, y, x, sigma = 4){
+  res = y - (beta[1] + beta[2]*x)
+  res * c(1,x) / sigma^2
+}
+S.beta.f = Vectorize(S.beta.f, vectorize.args = 'x')
+```
+
+
+#####
+
+
+```{r}
+S.beta = function(beta, y, w, delta, alpha1_star,
+                  sigma = 4, tau1 = 1){
+  #E[I(X>W)S.beta.f(Y,X,Z) | W,Y,Z] / E[I(X>W) | W,Y,Z]
+  v_x = 1/(beta[2]^2 / sigma^2 + 1/tau1^2)
+  eta_x = v_x * (beta[2] * (y - beta[1]) / sigma^2
+                 + alpha1_star / tau1^2)
+  if(delta==0){
+    if(w>1){
+      S.beta.f(beta, y, w, sigma) # Any value possible
+    } else{ #Middle part: integration
+      x_norm = (seq(w, 1, length.out = 20) - eta_x) / sqrt(v_x)
+      by = x_norm[2] - x_norm[1]
+      d = dnorm(x_norm)
+      num = S.beta.f(beta, y, x_norm*sqrt(v_x)+eta_x, sigma) %*% d
+      denom = sum(d)
+      num / denom
+    }
+  }else{
+    S.beta.f(beta, y, w, sigma)
+  }
+}
+S.beta.unif1 = function(beta, y, w, delta,
+                        sigma = 4){
+  #E[I(X>W)S.beta.f(Y,X,Z) | W,Y,Z] / E[I(X>W) | W,Y,Z]
+  v_x = 1/(beta[2]^2 / sigma^2)
+  eta_x = v_x * (beta[2] * (y - beta[1]) / sigma^2)
+  if(delta==0){
+    if(w>1){
+      S.beta.f(beta, y, w, sigma) # Any value possible
+    } else{ #Middle part: integration
+      x_norm = (seq(w, 1, length.out = 20) - eta_x) / sqrt(v_x)
+      by = x_norm[2] - x_norm[1]
+      d = dnorm(x_norm)
+      num = S.beta.f(beta, y, x_norm*sqrt(v_x)+eta_x, sigma) %*% d
+      denom = sum(d)
+      num / denom
+    }
+  }else{
+    S.beta.f(beta, y, w, sigma)
+  }
+}
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+find_alpha1_MLE = function(beta, y_data, w_data, delta_data,
+                           sigma = 4, tau1 = 1){
+  log_llhd = function(alpha1_star, y, w, delta){
+    v_x = 1/(beta[2]^2 / sigma^2 + 1/tau1^2)
+    eta_x = v_x * (beta[2] * (y - beta[1]) / sigma^2
+                   + alpha1_star / tau1^2)
+    if(delta == 1){ #log(eta1(w|z))
+      return(log(dtruncnorm(w,  
+                            a = -1, 
+                            b = 1, 
+                            mean = eta_x,
+                            sd = sqrt(v_x))))
+    }else{ #log(P(X > w|y,z) * f(y|z))
+      v_x = 1/(beta[2]^2 / sigma^2 + 1/tau1^2)
+      eta_x = v_x * (beta[2] * (y - beta[1]) / sigma^2
+                     + alpha1_star / tau1^2)
+      # Y|Z ~ N(beta_0 + beta_1 E(X|Z) + beta_2^T Z, 1 + beta_1^2)
+      return(log(pnorm(1, 
+                       mean = eta_x,
+                       sd = sqrt(v_x)) 
+                 - pnorm(w,
+                         mean = eta_x,
+                         sd = sqrt(v_x))) +
+               dnorm(y,
+                     mean = sum(c(1, alpha1_star) * beta),
+                     sd = sqrt(sigma^2 + beta[2]^2 * tau1^2), 
+                     log = T) - 
+               log(pnorm(1,
+                         mean = alpha1_star,
+                         sd = tau1) -
+                     pnorm(-1,
+                           mean = alpha1_star,
+                           sd = tau1))
+      ) 
+    }
+  }
+  log_llhd_sum = function(alpha1){
+    n = length(y_data)
+    llhd = 0
+    for(i in 1:n){
+      llhd = llhd +
+        log_llhd(alpha1, y_data[i], w_data[i], delta_data[i])
+    }
+    return(-llhd)
+  }
+  optimize(log_llhd_sum, interval = c(-5,5))$minimum
+}
+# # More values
+# alpha1_MLE = NULL
+# for(k in 1:1000){
+#   data_k = data_generating(k, n, d, beta, alpha1, alpha2)
+#   y_data = data_k$y_data
+#   c_data = data_k$c_data
+#   w_data = data_k$w_data
+#   delta_data = data_k$delta_data
+#   alpha1_MLE = cbind(alpha1_MLE,
+#                      find_alpha1_MLE(beta, y_data, w_data, delta_data))
+#   if(k %% 100 == 0){
+#     print(k)
+#   }
+# }
+# hist(alpha1_MLE[1,])
+```
+
+
+```{r}
+# Find MLE of alpha2
+find_alpha2_MLE = function(y_data, w_data, delta_data,
+                           sigma = 4, tau2 = 1){
+  log_llhd = function(alpha2_star, y, w, delta){
+    if(delta == 1){ #log(P(C > w | y,z))
+      return(log(1-ptruncnorm(w, 
+                              a = -1,
+                              b = 1,
+                              mean = sum(c(1, y) * alpha2_star), 
+                              sd = tau2)))
+    }else{ #log(eta2(w|y,z))
+      # Y|Z ~ N(beta_0 + beta_1 E(X|Z) + beta_2^T Z, 1 + beta_1^2)
+      return(log(dtruncnorm(w, 
+                            a = -1,
+                            b = 1,
+                            mean = sum(c(1, y) * alpha2_star), 
+                            sd = tau2)))
+    }
+  }
+  log_llhd_sum = function(alpha2){
+    n = length(y_data)
+    llhd = 0
+    for(i in 1:n){
+      llhd = llhd + log_llhd(alpha2, y_data[i], w_data[i], delta_data[i])
+    }
+    return(-llhd)
+  }
+  optim(rep(0,d+1), log_llhd_sum)$par
+}
+# # More values
+# alpha2_MLE = NULL
+# for(k in 1:1000){
+#   data_k = data_generating(k, n, d, beta, alpha1, alpha2)
+#   y_data = data_k$y_data
+#   c_data = data_k$c_data
+#   w_data = data_k$w_data
+#   delta_data = data_k$delta_data
+#   alpha2_MLE = cbind(alpha2_MLE,
+#                      find_alpha2_MLE(y_data, w_data, delta_data))
+#   if(k %% 100 == 0){
+#     print(k)
+#   }
+# }
+# hist(alpha2_MLE[1,])
+```
+
+
+```{r}
+pe.gauss.MLE.unif1 = function(beta, y_data, w_data, delta_data,
+                               sigma = 4, tau1 = 1){
+  len.beta = length(beta)
+  
+  val = rep(0, len.beta)
+  n = length(y_data)
+  for(i in 1:n){
+    val = val + S.beta.unif1(beta, y_data[i], w_data[i], delta_data[i],
+                                    sigma)
+  }
+  return(val)
+}
+
+```
+
+
+
+```{r}
+get_beta_param.MLE.unif1 = function(k, n, d, 
+                                  beta, alpha1, alpha2,
+                                  sigma = 4, tau1 = 1, tau2 = 1){
+  data_k = data_generating(k, n, d, beta, alpha1, alpha2, sigma, tau1, tau2)
+  y_data = data_k$y_data
+  w_data = data_k$w_data
+  delta_data = data_k$delta_data
+  
+  #equation solve
+  tic(k)
+  set.seed(k)
+  result = nleqslv::nleqslv(beta + rnorm(d+1) * 0.1, pe.gauss.MLE.unif1, 
+                            y_data = y_data,
+                            w_data = w_data,
+                            delta_data = delta_data,
+                            sigma = sigma)
+  toc()
+  print(result$message)
+  return(result$x)
+}
+# get_beta_param.MLE.unif1(1, n, d,
+#                        beta, alpha1, alpha2 = c(3, 0.12),
+#                        sigma = 4, tau1 = 1, tau2 = 1)
+```
+
+
+```{r, eval = F}
+myCluster <- makeCluster(detectCores()-1)
+registerDoSNOW(myCluster)
+M = 1000
+progress = function(n) cat(sprintf("task %d is complete\n", n))
+opts = list(progress=progress)
+clusterExport(myCluster, list('beta',
+                              'alpha1',
+                              'S.beta.f',
+                              'S.beta',
+                              'pe.gauss.MLE.unif1',
+                              'find_alpha1_MLE',
+                              'find_alpha2_MLE',
+                              'data_generating',
+                              'get_beta_param.MLE.unif1'))
+result_beta = foreach(k = 1:1000,
+                      .combine = 'cbind',
+                      .packages = c('MASS',
+                                    'foreach',
+                                    'doParallel',
+                                    'gaussquad',
+                                    'nleqslv',
+                                    'pracma',
+                                    'tictoc',
+                                    'truncnorm'),
+                      .options.snow=opts,
+                      .verbose = T)%dopar%
+  {
+    set.seed(k)
+    get_beta_param.MLE.unif1(k, n, d,
+                           beta, alpha1, alpha2 = c(3, 0.12),
+                           sigma = 4, tau1 = 1, tau2 = 1)
+  }
+
+save(result_beta, file = 'CaseNoZ-trunctrunc-MLE.unif1-low.Rdata')
+
+result_beta = foreach(k = 1:1000,
+                      .combine = 'cbind',
+                      .packages = c('MASS',
+                                    'foreach',
+                                    'doParallel',
+                                    'gaussquad',
+                                    'nleqslv',
+                                    'pracma',
+                                    'tictoc',
+                                    'truncnorm'),
+                      .options.snow=opts,
+                      .verbose = T)%dopar%
+  {
+    set.seed(k)
+    get_beta_param.MLE.unif1(k, n, d,
+                           beta, alpha1, alpha2 = c(1, 0.12),
+                           sigma = 4, tau1 = 1, tau2 = 1)
+  }
+
+save(result_beta, file = 'CaseNoZ-trunctrunc-MLE.unif1-mid.Rdata')
+
+result_beta = foreach(k = 1:1000,
+                      .combine = 'cbind',
+                      .packages = c('MASS',
+                                    'foreach',
+                                    'doParallel',
+                                    'gaussquad',
+                                    'nleqslv',
+                                    'pracma',
+                                    'tictoc',
+                                    'truncnorm'),
+                      .options.snow=opts,
+                      .verbose = T)%dopar%
+  {
+    set.seed(k)
+    get_beta_param.MLE.unif1(k, n, d,
+                           beta, alpha1, alpha2 = c(-1, 0.12),
+                           sigma = 4, tau1 = 1, tau2 = 1)
+  }
+
+save(result_beta, file = 'CaseNoZ-trunctrunc-MLE.unif1-high.Rdata')
+stopCluster(myCluster)
+```
+
+
+
+
+######################################3
+# Variance estimation
+```{r}
+estimated_variance_MLE.unif1 = function(beta, y_data, w_data, delta_data,
+                                      sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+                                      eps = 0.001){
+  len.beta = length(beta)
+  len.beta = length(beta)
+  alpha1_MLE = find_alpha1_MLE(beta, y_data, w_data, delta_data,
+                                sigma, tau1)
+  get_Sbeta.unif1 = function(beta, y_data, w_data, delta_data,
+                          sigma){
+    # Define x.a
+    n = length(y_data)
+    Sbeta.unif1 = matrix(0, nrow = n, ncol = len.beta)
+    
+    for(i in 1:n){
+        Sbeta.unif1[i,] = S.beta.unif1(beta, y_data[i], w_data[i], delta_data[i],
+                                 sigma)
+    }
+    return(Sbeta.unif1)
+  }
+  Sbeta.unif1 = get_Sbeta.unif1(beta, y_data, w_data, delta_data, 
+                           sigma)
+  
+  get_Sbeta = function(beta, y_data, w_data, delta_data,
+                          alpha1_star,
+                          sigma, tau1){
+    # Define x.a
+    n = length(y_data)
+    Sbeta = matrix(0, nrow = n, ncol = len.beta)
+    
+    for(i in 1:n){
+        Sbeta[i,] = S.beta(beta, y_data[i], w_data[i], delta_data[i],
+                           alpha1_star,
+                                 sigma, tau1)
+    }
+    return(Sbeta)
+  }
+  Sbeta = get_Sbeta(beta, y_data, w_data, delta_data, 
+                           alpha1_MLE,
+                           sigma, tau1)
+  
+  B = - cov(Sbeta.unif1, Sbeta)
+  B_inv = MASS::ginv(B)
+  Sigma = var(Sbeta.unif1)
+  # Find Sigma1
+  return(B_inv %*% Sigma %*% t(B_inv))
+}
+k = 1
+data_k = data_generating(k, n, d, beta, alpha1, alpha2 = c(3,0.12), sigma, tau1, tau2)
+y_data = data_k$y_data
+w_data = data_k$w_data
+delta_data = data_k$delta_data
+estimated_variance_MLE.unif1(beta, y_data, w_data, delta_data,
+                           sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+                           eps = 0.001)
+```
+
+```{r, eval = F}
+myCluster <- makeCluster(detectCores()-1)
+registerDoSNOW(myCluster)
+M = 1000
+progress = function(n) cat(sprintf("task %d is complete\n", n))
+opts = list(progress=progress)
+clusterExport(myCluster, list('beta',
+                              'alpha1',
+                              'S.beta.f',
+                              'S.beta',
+                              'pe.gauss.MLE.unif1',
+                              'find_alpha1_MLE',
+                              'find_alpha2_MLE',
+                              'data_generating',
+                              'get_beta_param.MLE.unif1',
+                              'estimated_variance_MLE.unif1'))
+load('CaseNoZ-trunctrunc-MLE.unif1-low.Rdata')
+variance = foreach(k = 1:1000,
+                   .combine = 'cbind',
+                   .packages = c('MASS',
+                                 'foreach',
+                                 'doParallel',
+                                 'gaussquad',
+                                 'nleqslv',
+                                 'pracma',
+                                 'tictoc',
+                                 'truncnorm'),
+                   .options.snow=opts,
+                   .verbose = T)%dopar% 
+  { 
+    tic(k)
+    beta_hat = result_beta[,k]
+    data_k = data_generating(k, n, d, beta, alpha1, alpha2 = c(3, 0.12), sigma, tau1, tau2)
+    y_data = data_k$y_data
+    w_data = data_k$w_data
+    delta_data = data_k$delta_data
+    var_k = diag(estimated_variance_MLE.unif1(
+      beta_hat, y_data, w_data, delta_data,
+      sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+      eps = 0.001))
+    toc()
+    c(k, var_k) 
+  }
+save(variance, file = 'VarianceNoZ-trunctrunc-MLE.unif1-low.Rdata')
+
+
+load('CaseNoZ-trunctrunc-MLE.unif1-mid.Rdata')
+variance = foreach(k = 1:1000,
+                   .combine = 'cbind',
+                   .packages = c('MASS',
+                                 'foreach',
+                                 'doParallel',
+                                 'gaussquad',
+                                 'nleqslv',
+                                 'pracma',
+                                 'tictoc',
+                                 'truncnorm'),
+                   .options.snow=opts,
+                   .verbose = T)%dopar% 
+  { 
+    tic(k)
+    beta_hat = result_beta[,k]
+    data_k = data_generating(k, n, d, beta, alpha1, alpha2 = c(1, 0.12), sigma, tau1, tau2)
+    y_data = data_k$y_data
+    w_data = data_k$w_data
+    delta_data = data_k$delta_data
+    var_k = diag(estimated_variance_MLE.unif1(
+      beta_hat, y_data, w_data, delta_data,
+      sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+      eps = 0.001))
+    toc()
+    c(k, var_k) 
+  }
+save(variance, file = 'VarianceNoZ-trunctrunc-MLE.unif1-mid.Rdata')
+
+
+load('CaseNoZ-trunctrunc-MLE.unif1-high.Rdata')
+variance = foreach(k = 1:1000,
+                   .combine = 'cbind',
+                   .packages = c('MASS',
+                                 'foreach',
+                                 'doParallel',
+                                 'gaussquad',
+                                 'nleqslv',
+                                 'pracma',
+                                 'tictoc',
+                                 'truncnorm'),
+                   .options.snow=opts,
+                   .verbose = T)%dopar% 
+  { 
+    tic(k)
+    beta_hat = result_beta[,k]
+    data_k = data_generating(k, n, d, beta, alpha1, alpha2 = c(-1, 0.12), sigma, tau1, tau2)
+    y_data = data_k$y_data
+    w_data = data_k$w_data
+    delta_data = data_k$delta_data
+    var_k = diag(estimated_variance_MLE.unif1(
+      beta_hat, y_data, w_data, delta_data,
+      sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+      eps = 0.001))
+    toc()
+    c(k, var_k) 
+  }
+save(variance, file = 'VarianceNoZ-trunctrunc-MLE.unif1-high.Rdata')
+
+stopCluster(myCluster)
+```

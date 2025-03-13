@@ -1,0 +1,503 @@
+---
+title: "Censored Covariates Simulation"
+author: "Kihyun Han"
+date: "6/25/2024"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,  warrning = F, message = F)
+```
+
+# Setting 1
+```{r}
+# Checking packages installation
+if(!require(MASS)){
+  install.packages("MASS",repos = "http://cran.us.r-project.org")
+  library(MASS)
+}
+if(!require(foreach)){
+  install.packages("foreach",repos = "http://cran.us.r-project.org")
+  library(foreach)
+}
+if(!require(doParallel)){
+  install.packages("doParallel",repos = "http://cran.us.r-project.org")
+  library(doParallel)
+}
+if(!require(gaussquad)){
+  install.packages("gaussquad",repos = "http://cran.us.r-project.org")
+  library(gaussquad)
+}
+if(!require(pracma)){
+  install.packages("pracma",repos = "http://cran.us.r-project.org")
+  library(pracma)
+}
+if(!require(truncnorm)){
+  install.packages("truncnorm",repos = "http://cran.us.r-project.org")
+  library(truncnorm)
+}
+if(!require(rootSolve)){
+  install.packages("rootSolve",repos = "http://cran.us.r-project.org")
+  library(rootSolve)
+}
+if(!require(nleqslv)){
+  install.packages("nleqslv",repos = "http://cran.us.r-project.org")
+  library(nleqslv)
+}
+if(!require(tictoc)){
+  install.packages("tictoc",repos = "http://cran.us.r-project.org")
+  library(tictoc)
+}
+if(!require(doSNOW)){
+  install.packages("doSNOW",repos = "http://cran.us.r-project.org")
+  library(doSNOW)
+}
+```
+
+## Data generating process
+```{r}
+# Data generating process
+n = 1000
+d = 1
+#alpha1
+alpha1 = 0
+tau1 = 1
+#beta
+beta = c(0, 3)
+sigma = 4
+#alpha2
+tau2 = 1
+```
+
+```{r}
+# Data generating process
+data_generating = function(k, n, d, beta, alpha1, alpha2,
+                           sigma = 4, tau1 = 1, tau2 = 1){
+  set.seed(k)
+  # X|Z ~ N(alpha1, 1) truncated in [-1,1]
+  x_data = rtruncnorm(n, 
+                      a = -1, 
+                      b = 1, 
+                      mean = alpha1,
+                      sd = tau1)
+  # Y|X ~ N(beta_0 + beta_1 X, 4)
+  trunc_norm = rtruncnorm(n, 
+                          a = -3, 
+                          b = 3, 
+                          mean = 0,
+                          sd = 1)
+  y_data = cbind(1,x_data) %*% beta + sigma * trunc_norm
+  # C|Y ~ N(alpha2_0 + alpha2_1 Y,1)
+  c_data = rtruncnorm(n, 
+                      a = -1, 
+                      b = 1, 
+                      mean = cbind(1,y_data) %*% alpha2,
+                      sd = tau2)
+  # generate W and Delta
+  w_data = pmin(c_data, x_data)
+  delta_data = as.numeric(x_data<=c_data)
+  # calculate the censoring rate
+  cens_rate = sum(c_data<=x_data)/n
+  list(x_data = x_data,
+       y_data = y_data,
+       c_data = c_data,
+       w_data = w_data,
+       delta_data = delta_data,
+       cens_rate = cens_rate)
+}
+```
+
+
+# Define score function
+
+```{r}
+# Define score function
+S_beta_f = function(beta, y, x, sigma = 4){
+  res = y - (beta[1] + beta[2]*x)
+  res * c(1,x) / sigma^2
+}
+S_beta_f = Vectorize(S_beta_f, vectorize.args = 'x')
+
+```
+
+#####
+
+
+```{r}
+surv_c3 = function(t, y, alpha2_star, tau2 = 1){
+  max(1 - ptruncnorm(t, 
+                     a = -1, 
+                     b = 1, 
+                     mean = sum(c(1, y) * alpha2_star),
+                     sd = tau2), 1 / n)
+}
+
+```
+
+```{r}
+pe_gauss_IPW_param2 = function(beta, y_data, w_data, delta_data,
+                               alpha2_star,
+                               sigma = 4, tau1 = 1, tau2 = 1){
+  len_beta = length(beta)
+  val = rep(0, len_beta)
+  n = length(y_data)
+  for(i in 1:n){
+    if(delta_data[i] == 1){
+      val = val + S_beta_f(beta, y_data[i], w_data[i], sigma) / 
+        surv_c3(w_data[i], y_data[i], alpha2_star, tau2) 
+    }
+  }
+  return(val)
+}
+```
+
+```{r}
+find_alpha1_MLE = function(beta, y_data, w_data, delta_data,
+                           sigma = 4, tau1 = 1){
+  log_llhd = function(alpha1_star, y, w, delta){
+    v_x = 1 / (beta[2]^2 / sigma^2 + 1 / tau1^2)
+    eta_x = v_x * (beta[2] * (y - beta[1]) / sigma^2
+                   + alpha1_star / tau1^2)
+    if(delta == 1){ # log(eta1(w|z))
+      return(log(dtruncnorm(w,  
+                            a = -1, 
+                            b = 1, 
+                            mean = eta_x,
+                            sd = sqrt(v_x))))
+    }else{ # log(P(X > w|y,z) * f(y|z))
+      v_x = 1 / (beta[2]^2 / sigma^2 + 1 / tau1^2)
+      eta_x = v_x * (beta[2] * (y - beta[1]) / sigma^2
+                     + alpha1_star / tau1^2)
+      # Y|Z ~ N(beta_0 + beta_1 E(X|Z) + beta_2^T Z, 1 + beta_1^2)
+      return(log(pnorm(1, 
+                       mean = eta_x,
+                       sd = sqrt(v_x)) 
+                 - pnorm(w,
+                         mean = eta_x,
+                         sd = sqrt(v_x))) +
+               dnorm(y,
+                     mean = sum(c(1, alpha1_star) * beta),
+                     sd = sqrt(sigma^2 + beta[2]^2 * tau1^2), 
+                     log = T) - 
+               log(pnorm(1,
+                         mean = alpha1_star,
+                         sd = tau1) -
+                     pnorm(-1,
+                           mean = alpha1_star,
+                           sd = tau1))
+      ) 
+    }
+  }
+  log_llhd_sum = function(alpha1){
+    n = length(y_data)
+    llhd = 0
+    for(i in 1:n){
+      llhd = llhd +
+        log_llhd(alpha1, y_data[i], w_data[i], delta_data[i])
+    }
+    return(-llhd)
+  }
+  optimize(log_llhd_sum, interval = c(-5, 5))$minimum
+}
+```
+
+
+```{r}
+find_alpha2_MLE = function(y_data, w_data, delta_data,
+                           sigma = 4, tau2 = 1){
+  log_llhd = function(alpha2_star, y, w, delta){
+    if(delta == 1){ # log(P(C > w | y,z))
+      return(log(1 - ptruncnorm(w, 
+                                a = -1,
+                                b = 1,
+                                mean = sum(c(1, y) * alpha2_star), 
+                                sd = tau2)))
+    }else{ # log(eta2(w|y,z))
+      # Y|Z ~ N(beta_0 + beta_1 E(X|Z) + beta_2^T Z, 1 + beta_1^2)
+      return(log(dtruncnorm(w, 
+                            a = -1,
+                            b = 1,
+                            mean = sum(c(1, y) * alpha2_star), 
+                            sd = tau2)))
+    }
+  }
+  log_llhd_sum = function(alpha2){
+    n = length(y_data)
+    llhd = 0
+    for(i in 1:n){
+      llhd = llhd + log_llhd(alpha2, y_data[i], w_data[i], delta_data[i])
+    }
+    return(-llhd)
+  }
+  optim(rep(0, d + 1), log_llhd_sum)$par
+}
+
+```
+
+
+
+```{r}
+get_beta_param_IPW_param2 = function(k, n, d, 
+                                     beta, alpha1, alpha2,
+                                     sigma = 4, tau1 = 1, tau2 = 1){
+  data_k = data_generating(k, n, d, beta, alpha1, alpha2, sigma, tau1, tau2)
+  y_data = data_k$y_data
+  w_data = data_k$w_data
+  delta_data = data_k$delta_data
+  
+  alpha2_MLE = find_alpha2_MLE(y_data, w_data, delta_data, sigma, tau2)
+  
+  # equation solve
+  tic(k)
+  set.seed(k)
+  result = nleqslv::nleqslv(beta + rnorm(d + 1) * 0.1, pe_gauss_IPW_param2, 
+                            y_data = y_data,
+                            w_data = w_data,
+                            delta_data = delta_data,
+                            alpha2_star = alpha2_MLE,
+                            sigma = sigma,
+                            tau1 = tau1,
+                            tau2 = tau2)
+  toc()
+  print(result$message)
+  return(result$x)
+}
+# get_beta_param_IPW_param2(1, n, d, 
+#                           beta, alpha1, alpha2 = c(3, 0.12),
+#                           sigma = 4, tau1 = 1, tau2 = 1)
+
+```
+
+
+```{r, eval = F}
+myCluster <- makeCluster(detectCores() - 1)
+registerDoSNOW(myCluster)
+M = 1000
+progress = function(n) cat(sprintf("task %d is complete\n", n))
+opts = list(progress = progress)
+clusterExport(myCluster, list('beta',
+                               'alpha1',
+                               'S_beta_f',
+                               'pe_gauss_IPW_param2',
+                               'find_alpha2_MLE',
+                               'data_generating',
+                               'get_beta_param_IPW_param2'))
+result_beta = foreach(k = 1:1000,
+                      .combine = 'cbind',
+                      .packages = c('MASS',
+                                    'foreach',
+                                    'doParallel',
+                                    'gaussquad',
+                                    'nleqslv',
+                                    'pracma',
+                                    'tictoc',
+                                    'truncnorm'),
+                      .options.snow = opts,
+                      .verbose = T) %dopar%
+  {
+    set.seed(k)
+    get_beta_param_IPW_param2(k, n, d,
+                              beta, alpha1, alpha2 = c(3, 0.12),
+                              sigma = 4, tau1 = 1, tau2 = 1)
+  }
+
+save(result_beta, file = 'Case_IPW_param2_low.Rdata')
+
+result_beta = foreach(k = 1:1000,
+                      .combine = 'cbind',
+                      .packages = c('MASS',
+                                    'foreach',
+                                    'doParallel',
+                                    'gaussquad',
+                                    'nleqslv',
+                                    'pracma',
+                                    'tictoc',
+                                    'truncnorm'),
+                      .options.snow = opts,
+                      .verbose = T) %dopar%
+  {
+    set.seed(k)
+    get_beta_param_IPW_param2(k, n, d,
+                              beta, alpha1, alpha2 = c(1, 0.12),
+                              sigma = 4, tau1 = 1, tau2 = 1)
+  }
+
+save(result_beta, file = 'Case_IPW_param2_mid.Rdata')
+
+result_beta = foreach(k = 1:1000,
+                      .combine = 'cbind',
+                      .packages = c('MASS',
+                                    'foreach',
+                                    'doParallel',
+                                    'gaussquad',
+                                    'nleqslv',
+                                    'pracma',
+                                    'tictoc',
+                                    'truncnorm'),
+                      .options.snow = opts,
+                      .verbose = T) %dopar%
+  {
+    set.seed(k)
+    get_beta_param_IPW_param2(k, n, d,
+                              beta, alpha1, alpha2 = c(-1, 0.12),
+                              sigma = 4, tau1 = 1, tau2 = 1)
+  }
+
+save(result_beta, file = 'Case_IPW_param2_high.Rdata')
+stopCluster(myCluster)
+
+```
+
+
+
+
+######################################3
+# Variance estimation
+```{r}
+estimated_variance_IPW_param2 = function(beta, y_data, w_data, delta_data,
+                                         sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+                                         eps = 0.001){
+  len_beta = length(beta)
+  alpha2_MLE = find_alpha2_MLE(y_data, w_data, delta_data, sigma, tau2)
+  get_Sbeta_IPW = function(beta, y_data, w_data, delta_data,
+                           alpha2_star,
+                           sigma, tau2){
+    n = length(y_data)
+    Sbeta_IPW = matrix(0, nrow = n, ncol = len_beta)
+    
+    for(i in 1:n){
+      if(delta_data[i] == 1)
+        Sbeta_IPW[i, ] = S_beta_f(beta, y_data[i], w_data[i], sigma) / 
+          surv_c3(w_data[i], y_data[i], alpha2_star, tau2) 
+    }
+    return(Sbeta_IPW)
+  }
+  Sbeta_IPW = get_Sbeta_IPW(beta, y_data, w_data, delta_data, 
+                            alpha2_MLE,
+                            sigma, tau2)
+  
+  get_Sbeta = function(beta, y_data, w_data, delta_data,
+                       sigma){
+    n = length(y_data)
+    Sbeta = matrix(0, nrow = n, ncol = len_beta)
+    
+    for(i in 1:n){
+      if(delta_data[i] == 1)
+        Sbeta[i, ] = S_beta_f(beta, y_data[i], w_data[i], sigma) 
+    }
+    return(Sbeta)
+  }
+  Sbeta = get_Sbeta(beta, y_data, w_data, delta_data, sigma)
+  
+  B = - cov(Sbeta_IPW, Sbeta)
+  B_inv = MASS::ginv(B)
+  Sigma = cov(Sbeta_IPW)
+  return(B_inv %*% Sigma %*% t(B_inv))
+}
+
+```
+
+```{r, eval = F}
+myCluster <- makeCluster(detectCores() - 1)
+registerDoSNOW(myCluster)
+M = 1000
+progress = function(n) cat(sprintf("task %d is complete\n", n))
+opts = list(progress = progress)
+clusterExport(myCluster, list('beta',
+                               'alpha1',
+                               'S_beta_f',
+                               'pe_gauss_IPW_param2',
+                               'find_alpha2_MLE',
+                               'data_generating',
+                               'get_beta_param_IPW_param2',
+                               'estimated_variance_IPW_param2'))
+load('Case_IPW_param2_low.Rdata')
+variance = foreach(k = 1:1000,
+                   .combine = 'cbind',
+                   .packages = c('MASS',
+                                 'foreach',
+                                 'doParallel',
+                                 'gaussquad',
+                                 'nleqslv',
+                                 'pracma',
+                                 'tictoc',
+                                 'truncnorm'),
+                   .options.snow = opts,
+                   .verbose = T) %dopar% 
+  { 
+    tic(k)
+    beta_hat = result_beta[, k]
+    data_k = data_generating(k, n, d, beta, alpha1, alpha2 = c(3, 0.12), sigma, tau1, tau2)
+    y_data = data_k$y_data
+    w_data = data_k$w_data
+    delta_data = data_k$delta_data
+    var_k = diag(estimated_variance_IPW_param2(
+      beta_hat, y_data, w_data, delta_data,
+      sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+      eps = 0.001))
+    toc()
+    c(k, var_k) 
+  }
+save(variance, file = 'Variance_IPW_param2_low.Rdata')
+
+load('Case_IPW_param2_mid.Rdata')
+variance = foreach(k = 1:1000,
+                   .combine = 'cbind',
+                   .packages = c('MASS',
+                                 'foreach',
+                                 'doParallel',
+                                 'gaussquad',
+                                 'nleqslv',
+                                 'pracma',
+                                 'tictoc',
+                                 'truncnorm'),
+                   .options.snow = opts,
+                   .verbose = T) %dopar% 
+  { 
+    tic(k)
+    beta_hat = result_beta[, k]
+    data_k = data_generating(k, n, d, beta, alpha1, alpha2 = c(1, 0.12), sigma, tau1, tau2)
+    y_data = data_k$y_data
+    w_data = data_k$w_data
+    delta_data = data_k$delta_data
+    var_k = diag(estimated_variance_IPW_param2(
+      beta_hat, y_data, w_data, delta_data,
+      sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+      eps = 0.001))
+    toc()
+    c(k, var_k) 
+  }
+save(variance, file = 'Variance_IPW_param2_mid.Rdata')
+
+load('Case_IPW_param2_high.Rdata')
+variance = foreach(k = 1:1000,
+                   .combine = 'cbind',
+                   .packages = c('MASS',
+                                 'foreach',
+                                 'doParallel',
+                                 'gaussquad',
+                                 'nleqslv',
+                                 'pracma',
+                                 'tictoc',
+                                 'truncnorm'),
+                   .options.snow = opts,
+                   .verbose = T) %dopar% 
+  { 
+    tic(k)
+    beta_hat = result_beta[, k]
+    data_k = data_generating(k, n, d, beta, alpha1, alpha2 = c(-1, 0.12), sigma, tau1, tau2)
+    y_data = data_k$y_data
+    w_data = data_k$w_data
+    delta_data = data_k$delta_data
+    var_k = diag(estimated_variance_IPW_param2(
+      beta_hat, y_data, w_data, delta_data,
+      sigma = 4, tau1 = 1, tau2 = 1, tt = 20, m = 20,
+      eps = 0.001))
+    toc()
+    c(k, var_k) 
+  }
+save(variance, file = 'Variance_IPW_param2_high.Rdata')
+
+stopCluster(myCluster)
+
+```
