@@ -1,0 +1,12 @@
+Package: spyce
+Title: Semi-Parametric Y-dependent right-Censored Covariate Estimator
+Version: 0.0.0.9000
+Authors@R: 
+    person("Kihyun", "Han", , "kqh5716@psu.edu", role = c("aut", "cre"))
+Description: This package analyzes survival data with oucome-dependent right-censored covariate. The semiparametric estimator SPYCE is implemented via `get_SPYCE_...` functions. This package provides other estimators for analyzing the same data: complete case estimator (CC), imputation estimator, inverse probability weighting estimator (IPW), and the maximum likelihood estimator (MLE). The estimated asymptotic variance for the estimators can be computed with corresponding `variance_...` functions. Conditional Kaplan-Meier estimator as an auxiliary tool for nonparametric estimators can also be implemented with this package.
+License: `use_mit_license()`
+URL: https://github.com/khnhan/spyce, arxiv
+Imports: MASS, truncnorm, nleqslv, ggplot2
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
