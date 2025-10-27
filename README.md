@@ -22,7 +22,7 @@ It is assumed that $X\bot C\mid Y,Z$, and $\eta_1 = f_{X|Z}$ and $\eta_2 = f_{C|
 The functions `get_...` find an estimator of $\beta$ and $\sigma$, and 
 the functions `variance_...` compute the estimated asymptotic variance of the estimators.:
 - With `z_data` present, then $Y\mid X,Z \sim N\big(\beta_0+\beta_1 X+\beta_2 Z+\beta_3 ZX,\ \sigma^2\big)$.
-- Without `z_data`, then $Y\mid X \sim N\!\big(\beta_0+\beta_1 X,\ \sigma^2\big)$.
+- Without `z_data`, then $Y\mid X \sim N\big(\beta_0+\beta_1 X,\ \sigma^2\big)$.
 
 Each of the estimators (CC, imputation, IPW, MLE, SPYCE) has a parametric nuisance distribution version (truncated normal) and a nonparametric nuisance distribution version, while each supports four modes:
 - (A) estimate $(\beta,\sigma)$ with `z_data`
